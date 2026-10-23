@@ -22,6 +22,9 @@ import 'viewer_support.dart';
 import 'my_utils.dart';
 
 final _sidebarProvider = NotifierProvider<_Sidebar, bool>(_Sidebar.new);
+final screenCapturerProvider = Provider<ScreenCapturer>(
+  (ref) => screenCapturer,
+);
 final startupImageProvider = Provider<String?>((ref) => null);
 
 class _Sidebar extends Notifier<bool> {
@@ -442,6 +445,17 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
       _folderMonitor.stop();
     }
     final request = ++_folderRequest;
+    final selectionRequest = _request;
+    bool isObsolete() {
+      if (!mounted || request != _folderRequest) return true;
+      if (refresh && selectionRequest != _request) {
+        // Retry with the latest selection instead of restoring an old snapshot.
+        _refreshFolder();
+        return true;
+      }
+      return false;
+    }
+
     try {
       final entries =
           (await Directory(folder).list(followLinks: false).toList())
@@ -459,7 +473,7 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
           first.path,
         ).toLowerCase().compareTo(_name(second.path).toLowerCase());
       });
-      if (!mounted || request != _folderRequest) return;
+      if (isObsolete()) return;
       final images = entries
           .whereType<File>()
           .where((file) => _isImage(file.path))
@@ -474,7 +488,7 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
         final stat = await File(images[selected].path).stat();
         stamp = '${stat.modified.microsecondsSinceEpoch}:${stat.size}';
       }
-      if (!mounted || request != _folderRequest) return;
+      if (isObsolete()) return;
       final preserve =
           refresh &&
           (_hasCapture ||
@@ -491,7 +505,7 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
           ).evict();
         }
       }
-      if (!mounted || request != _folderRequest) return;
+      if (isObsolete()) return;
       if (!preserve) ++_request;
       setState(() {
         _folder = folder;
@@ -634,12 +648,14 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
     CapturedData? captured;
     Object? captureError;
     try {
-      captured = await screenCapturer.capture(
-        mode: mode,
-        imagePath: temporaryPath,
-        copyToClipboard: false,
-        silent: false,
-      );
+      captured = await ref
+          .read(screenCapturerProvider)
+          .capture(
+            mode: mode,
+            imagePath: temporaryPath,
+            copyToClipboard: false,
+            silent: false,
+          );
     } catch (error) {
       captureError = error;
     }
@@ -653,16 +669,11 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
         if (temporaryFile.existsSync()) {
           bytes = await temporaryFile.readAsBytes();
         }
-        if (bytes == null) {
-          try {
-            bytes = await screenCapturer.readImageFromClipboard();
-          } catch (error) {
-            captureError ??= error;
-          }
-        }
       }
       if (!mounted) return;
       if (bytes == null) {
+        // No output and no plugin error means the user cancelled capture.
+        if (captureError == null) return;
         m.err('Capture failed: $captureError');
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Capture failed. Please try again.')),

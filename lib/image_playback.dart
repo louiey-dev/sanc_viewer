@@ -187,10 +187,36 @@ class _PlaybackImageState extends State<PlaybackImage> {
   }
 
   void _toggle() {
+    final codec = _codec;
+    final restart =
+        !widget.playback.playing &&
+        codec != null &&
+        codec.repetitionCount >= 0 &&
+        _frame == codec.frameCount - 1 &&
+        _loops >= codec.repetitionCount;
     widget.playback.playing = !widget.playback.playing;
-    _loops = 0;
     widget.playback.changed();
-    _schedule();
+    if (!restart) {
+      _schedule();
+      return;
+    }
+    _timer?.cancel();
+    _queue = _queue
+        .then<void>((_) async {
+          if (!mounted || !widget.playback.playing) return;
+          final restarted = await ui.instantiateImageCodec(widget.bytes);
+          if (!mounted) {
+            restarted.dispose();
+            return;
+          }
+          _codec?.dispose();
+          _codec = restarted;
+          _frame = -1;
+          _loops = 0;
+          await _decode();
+          _schedule();
+        })
+        .catchError(_decodeFailed);
   }
 
   void _step(int delta) {
