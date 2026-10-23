@@ -33,6 +33,27 @@ class AppSettings {
     return settings;
   }
 
+  bool get thumbnails => _values['thumbnails'] == true;
+  bool get checkerboard => _values['checkerboard'] != false;
+  List<String> get recentFolders => (_values['recentFolders'] is List
+      ? (_values['recentFolders'] as List).whereType<String>().take(10).toList()
+      : <String>[]);
+
+  void rememberFolder(String folder) {
+    final previous = recentFolders.where(
+      (item) => Platform.isWindows
+          ? item.toLowerCase() != folder.toLowerCase()
+          : item != folder,
+    );
+    _values['recentFolders'] = [folder, ...previous].take(10).toList();
+    update();
+  }
+
+  void clearRecentFolders() {
+    _values['recentFolders'] = <String>[];
+    update();
+  }
+
   bool get dark => _values['dark'] == true;
   bool get windowMaximized => _values['windowMaximized'] == true;
   Size? get windowSize {
@@ -67,6 +88,8 @@ class AppSettings {
 
   void update({
     bool? dark,
+    bool? thumbnails,
+    bool? checkerboard,
     Size? windowSize,
     bool? windowMaximized,
     bool? sidebar,
@@ -76,6 +99,8 @@ class AppSettings {
     String? image,
     bool clearImage = false,
   }) {
+    if (thumbnails != null) _values['thumbnails'] = thumbnails;
+    if (checkerboard != null) _values['checkerboard'] = checkerboard;
     if (dark != null) _values['dark'] = dark;
     if (windowSize != null &&
         windowSize.width.isFinite &&

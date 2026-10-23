@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -15,7 +17,8 @@ import 'app_info.dart';
 import 'app_settings.dart';
 import 'app_theme.dart';
 import 'image_details.dart';
-import 'pixel_image.dart';
+import 'image_playback.dart';
+import 'viewer_support.dart';
 import 'my_utils.dart';
 
 final _sidebarProvider = NotifierProvider<_Sidebar, bool>(_Sidebar.new);
@@ -58,6 +61,17 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
   bool _hasCapture = false;
   bool _isMaximized = false;
   bool _toolbarVisible = true;
+  bool _thumbnails = false;
+  bool _checkerboard = true;
+  bool _fullScreen = false;
+  bool _dragging = false;
+  bool _restoring = true;
+  bool _openingFolder = false;
+  final _folderMonitor = FolderMonitor();
+  final _playback = ImagePlayback();
+  Size _viewport = Size.zero;
+  int _viewportRevision = 0;
+  String? _selectedStamp;
 
   XFile? get _current => _files.isEmpty ? null : _files[_index];
 
@@ -68,9 +82,12 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
     _sidebarWidth = settings.sidebarWidth;
     _toolbarVisible = settings.toolbar;
     _isMaximized = settings.windowMaximized;
+    _thumbnails = settings.thumbnails;
+    _checkerboard = settings.checkerboard;
     windowManager.addListener(this);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted) return;
+      if (!mounted || !_restoring) return;
+      _restoring = false;
       final startupImage = ref.read(startupImageProvider);
       if (startupImage != null && _isImage(startupImage)) {
         final file = File(startupImage).absolute;
@@ -89,6 +106,8 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
   @override
   void dispose() {
     windowManager.removeListener(this);
+    _folderMonitor.stop();
+    _playback.dispose();
     _transform.dispose();
     _pixel.dispose();
     super.dispose();
@@ -124,6 +143,186 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
       ref.read(appSettingsProvider).update(windowSize: size);
     } catch (_) {
       // Window APIs may be unavailable outside the desktop runner.
+    }
+  }
+
+  @override
+  void onWindowFocus() => _refreshFolder();
+
+  @override
+  void onWindowEnterFullScreen() {
+    if (mounted) setState(() => _fullScreen = true);
+  }
+
+  @override
+  void onWindowLeaveFullScreen() {
+    if (mounted) setState(() => _fullScreen = false);
+  }
+
+  Future<void> _toggleFullScreen({bool exit = false}) async {
+    try {
+      final next = exit ? false : !_fullScreen;
+      await windowManager.setFullScreen(next);
+      if (mounted) setState(() => _fullScreen = next);
+    } catch (error) {
+      m.err('Fullscreen failed: $error');
+    }
+  }
+
+  void _refreshFolder() {
+    final folder = _folder;
+    if (mounted && folder != null && !_openingFolder) {
+      unawaited(
+        _loadFolder(folder, selectedPath: _current?.path, refresh: true),
+      );
+    }
+  }
+
+  Future<void> _openDropped(List<String> paths) async {
+    _restoring = false;
+    for (final path in paths) {
+      if (await Directory(path).exists()) {
+        if (mounted) await _loadFolder(path);
+        return;
+      }
+      if (_isImage(path) && await File(path).exists()) {
+        if (mounted) {
+          await _loadFolder(File(path).parent.path, selectedPath: path);
+        }
+        return;
+      }
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Drop a supported image or folder.')),
+      );
+    }
+  }
+
+  void _fit() => _transform.value = Matrix4.identity();
+
+  void _actualSize() {
+    final image = _dimensions;
+    if (image == null || _viewport.isEmpty) return;
+    final scale =
+        1 /
+        (imageFitScale(image, _viewport) * View.of(context).devicePixelRatio);
+    _transform.value = Matrix4.identity()
+      ..translateByDouble(
+        (_viewport.width - _viewport.width * scale) / 2,
+        (_viewport.height - _viewport.height * scale) / 2,
+        0,
+        1,
+      )
+      ..scaleByDouble(scale, scale, scale, 1);
+  }
+
+  void _setThumbnails(bool value) {
+    setState(() => _thumbnails = value);
+    ref.read(appSettingsProvider).update(thumbnails: value);
+  }
+
+  Widget _thumbnail(String path) => SizedBox(
+    width: 48,
+    height: 48,
+    child: Image.file(
+      File(path),
+      key: ValueKey('thumbnail-$path-$_folderRequest'),
+      cacheWidth: 96,
+      fit: BoxFit.contain,
+      errorBuilder: (context, error, stack) =>
+          const Icon(Icons.broken_image_outlined),
+    ),
+  );
+
+  Future<void> _showContextMenu(Offset position, {String? path}) async {
+    final target = path ?? _current?.path;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final local = overlay.globalToLocal(position);
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        local & Size.zero,
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        if (path != null)
+          const PopupMenuItem(value: 'open', child: Text('Open')),
+        if (_bytes != null && (path == null || _samePath(path, _current?.path)))
+          const PopupMenuItem(value: 'copy', child: Text('Copy image')),
+        if (target != null) ...[
+          const PopupMenuItem(value: 'path', child: Text('Copy file path')),
+          const PopupMenuItem(
+            value: 'folder',
+            child: Text('Open containing folder'),
+          ),
+        ],
+        const PopupMenuItem(value: 'fit', child: Text('Fit to window')),
+        const PopupMenuItem(value: 'actual', child: Text('Actual size (100%)')),
+        const PopupMenuItem(
+          value: 'fullscreen',
+          child: Text('Toggle fullscreen'),
+        ),
+      ],
+    );
+    if (!mounted) return;
+    try {
+      switch (action) {
+        case 'open':
+          if (target != null) await _openDropped([target]);
+        case 'copy':
+          await _copyImage();
+        case 'path':
+          if (target != null) {
+            await Clipboard.setData(ClipboardData(text: target));
+          }
+        case 'folder':
+          if (target != null &&
+              !await launchUrl(
+                Uri.directory(File(target).parent.path),
+                mode: LaunchMode.externalApplication,
+              )) {
+            throw StateError('Could not open the folder');
+          }
+        case 'fit':
+          _fit();
+        case 'actual':
+          _actualSize();
+        case 'fullscreen':
+          await _toggleFullScreen();
+      }
+    } catch (error) {
+      m.err('Context action failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not complete the selected action.'),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _saveFrame() async {
+    try {
+      final bytes = await _playback.png();
+      if (bytes == null || !mounted) return;
+      final location = await getSaveLocation(
+        suggestedName: 'frame_${_playback.frame + 1}.png',
+        acceptedTypeGroups: [
+          const XTypeGroup(label: 'PNG image', extensions: ['png']),
+        ],
+      );
+      if (location != null) {
+        await File(location.path).writeAsBytes(bytes, flush: true);
+      }
+    } catch (error) {
+      m.err('Save frame failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not save the current frame.')),
+        );
+      }
     }
   }
 
@@ -203,6 +402,16 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
 
   String _name(String path) => path.replaceAll('\\', '/').split('/').last;
 
+  bool _samePath(String first, String? second) {
+    if (second == null) return false;
+    String normalized(String path) {
+      final value = File(path).absolute.uri.normalizePath().toFilePath();
+      return Platform.isWindows ? value.toLowerCase() : value;
+    }
+
+    return normalized(first) == normalized(second);
+  }
+
   Future<void> _openFolder() async {
     try {
       final folder = await getDirectoryPath();
@@ -222,10 +431,26 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
     );
   }
 
-  Future<void> _loadFolder(String folder, {String? selectedPath}) async {
+  Future<void> _loadFolder(
+    String folder, {
+    String? selectedPath,
+    bool refresh = false,
+  }) async {
+    _restoring = false;
+    if (!refresh) {
+      _openingFolder = true;
+      _folderMonitor.stop();
+    }
     final request = ++_folderRequest;
     try {
-      final entries = await Directory(folder).list(followLinks: false).toList();
+      final entries =
+          (await Directory(folder).list(followLinks: false).toList())
+              .where(
+                (entry) =>
+                    entry is Directory ||
+                    (entry is File && _isImage(entry.path)),
+              )
+              .toList();
       entries.sort((first, second) {
         if ((first is Directory) != (second is Directory)) {
           return first is Directory ? -1 : 1;
@@ -240,61 +465,112 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
           .where((file) => _isImage(file.path))
           .map((file) => XFile(file.path))
           .toList();
-      final selected = images.indexWhere((file) => file.path == selectedPath);
-      ++_request;
+      final selected = images.indexWhere(
+        (file) => _samePath(file.path, selectedPath),
+      );
+      final currentPath = _current?.path;
+      String? stamp;
+      if (selected >= 0) {
+        final stat = await File(images[selected].path).stat();
+        stamp = '${stat.modified.microsecondsSinceEpoch}:${stat.size}';
+      }
+      if (!mounted || request != _folderRequest) return;
+      final preserve =
+          refresh &&
+          (_hasCapture ||
+              (selected >= 0 &&
+                  _samePath(images[selected].path, currentPath) &&
+                  stamp == _selectedStamp &&
+                  _bytes != null));
+      if (refresh && _thumbnails) {
+        for (final file in images) {
+          await ResizeImage.resizeIfNeeded(
+            96,
+            null,
+            FileImage(File(file.path)),
+          ).evict();
+        }
+      }
+      if (!mounted || request != _folderRequest) return;
+      if (!preserve) ++_request;
       setState(() {
         _folder = folder;
         _entries = entries;
         _files = images;
         _index = selected < 0 ? 0 : selected;
-        _bytes = null;
-        _dimensions = null;
-        _details = const ImageDetails();
-        _pixel.value = 'Pixel —';
-        _error = null;
-        _loading = false;
+        if (!preserve) {
+          _bytes = null;
+          _dimensions = null;
+          _details = const ImageDetails();
+          _pixel.value = 'Pixel ?';
+          _error = null;
+          _loading = false;
+          _hasCapture = false;
+        }
       });
-      ref.read(appSettingsProvider).update(folder: folder, clearImage: true);
-      if (images.isNotEmpty) await _select(_index);
+      final settings = ref.read(appSettingsProvider);
+      if (!refresh) {
+        settings.rememberFolder(folder);
+        _folderMonitor.watch(folder, _refreshFolder);
+      }
+      if (!preserve) {
+        settings.update(folder: folder, clearImage: true);
+        if (images.isNotEmpty) await _select(_index);
+      }
     } catch (_) {
-      if (request == _folderRequest) _folderError();
+      if (mounted && request == _folderRequest) {
+        if (!refresh) {
+          _folderError();
+          if (_folder != null) _folderMonitor.watch(_folder!, _refreshFolder);
+        }
+      }
+    } finally {
+      if (!refresh && request == _folderRequest) _openingFolder = false;
     }
   }
 
   Widget _entryTile(FileSystemEntity entry) {
     final directory = entry is Directory;
-    final imageIndex = _files.indexWhere((file) => file.path == entry.path);
-    return Padding(
-      padding: EdgeInsets.only(bottom: 4),
-      child: ListTile(
-        selected: imageIndex >= 0 && imageIndex == _index,
-        selectedTileColor: Theme.of(context).colorScheme.primaryContainer,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        leading: Icon(
-          directory
-              ? Icons.folder_outlined
+    final imageIndex = _files.indexWhere(
+      (file) => _samePath(file.path, entry.path),
+    );
+    return GestureDetector(
+      onSecondaryTapDown: (details) =>
+          _showContextMenu(details.globalPosition, path: entry.path),
+      child: Padding(
+        padding: EdgeInsets.only(bottom: 4),
+        child: ListTile(
+          selected: imageIndex >= 0 && imageIndex == _index,
+          selectedTileColor: Theme.of(context).colorScheme.primaryContainer,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          leading: _thumbnails && imageIndex >= 0
+              ? _thumbnail(entry.path)
+              : Icon(
+                  directory
+                      ? Icons.folder_outlined
+                      : imageIndex >= 0
+                      ? Icons.image_outlined
+                      : Icons.insert_drive_file_outlined,
+                  size: 20,
+                ),
+          title: Text(
+            _name(entry.path),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 12),
+          ),
+          onTap: directory
+              ? () => _loadFolder(entry.path)
               : imageIndex >= 0
-              ? Icons.image_outlined
-              : Icons.insert_drive_file_outlined,
-          size: 20,
+              ? () => _select(imageIndex)
+              : () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('This file is not a supported image.'),
+                    ),
+                  );
+                },
         ),
-        title: Text(
-          _name(entry.path),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontSize: 12),
-        ),
-        onTap: directory
-            ? () => _loadFolder(entry.path)
-            : imageIndex >= 0
-            ? () => _select(imageIndex)
-            : () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('This file is not a supported image.'),
-                  ),
-                );
-              },
       ),
     );
   }
@@ -316,6 +592,7 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
     });
     try {
       final bytes = await file.readAsBytes();
+      final stat = await File(file.path).stat();
       final codec = await ui.instantiateImageCodec(bytes);
       late final Size dimensions;
       try {
@@ -332,6 +609,7 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
       _transform.value = Matrix4.identity();
       setState(() {
         _bytes = bytes;
+        _selectedStamp = '${stat.modified.microsecondsSinceEpoch}:${stat.size}';
         _dimensions = dimensions;
         _pixel.value = 'Pixel —';
         _loading = false;
@@ -426,7 +704,8 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
   }
 
   Future<void> _copyImage() async {
-    final bytes = _bytes;
+    final bytes = await _playback.png() ?? _bytes;
+    if (!mounted) return;
     if (bytes == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Open an image before copying.')),
@@ -543,6 +822,15 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
     return CallbackShortcuts(
       bindings: {
         SingleActivator(LogicalKeyboardKey.keyO, control: true): _open,
+        SingleActivator(LogicalKeyboardKey.f11): _toggleFullScreen,
+        SingleActivator(LogicalKeyboardKey.escape): () {
+          if (_fullScreen) _toggleFullScreen(exit: true);
+        },
+        SingleActivator(LogicalKeyboardKey.digit1, control: true): _actualSize,
+        SingleActivator(LogicalKeyboardKey.digit0, control: true): _fit,
+        SingleActivator(LogicalKeyboardKey.space): () {
+          if (_playback.frameCount > 1) _playback.toggle();
+        },
         SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
             _select(_index - 1),
         SingleActivator(LogicalKeyboardKey.arrowRight): () =>
@@ -559,31 +847,62 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
       child: Focus(
         autofocus: true,
         child: Scaffold(
-          body: SafeArea(
-            child: Column(
-              children: [
-                _titleBar(),
-                if (_toolbarVisible) _toolbar(sidebar),
-                Expanded(
-                  child: LayoutBuilder(
-                    builder: (context, constraints) => Row(
-                      children: [
-                        if (sidebar && constraints.maxWidth >= 640) ...[
-                          _sidebar(
-                            _sidebarWidth.clamp(
-                              200,
-                              _maxSidebarWidth(constraints.maxWidth),
-                            ),
-                          ),
-                          _sidebarResizeHandle(constraints.maxWidth),
-                        ],
-                        Expanded(child: _canvas()),
-                      ],
+          body: DropTarget(
+            onDragEntered: (_) => setState(() => _dragging = true),
+            onDragExited: (_) => setState(() => _dragging = false),
+            onDragDone: (details) {
+              setState(() => _dragging = false);
+              unawaited(
+                _openDropped(details.files.map((file) => file.path).toList()),
+              );
+            },
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                border: _dragging
+                    ? Border.all(
+                        color: Theme.of(context).colorScheme.primary,
+                        width: 3,
+                      )
+                    : null,
+              ),
+              child: SafeArea(
+                child: Column(
+                  children: [
+                    if (!_fullScreen) _titleBar(),
+                    if (_toolbarVisible && !_fullScreen) _toolbar(sidebar),
+                    Expanded(
+                      child: LayoutBuilder(
+                        builder: (context, constraints) => Row(
+                          children: [
+                            if (sidebar &&
+                                !_fullScreen &&
+                                constraints.maxWidth >= 640) ...[
+                              _sidebar(
+                                _sidebarWidth.clamp(
+                                  200,
+                                  _maxSidebarWidth(constraints.maxWidth),
+                                ),
+                              ),
+                              _sidebarResizeHandle(constraints.maxWidth),
+                            ],
+                            Expanded(child: _canvas()),
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
+                    if (!_fullScreen) _statusBar(),
+                    if (_fullScreen)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: IconButton(
+                          tooltip: 'Exit fullscreen (Esc)',
+                          onPressed: () => _toggleFullScreen(exit: true),
+                          icon: const Icon(Icons.fullscreen_exit),
+                        ),
+                      ),
+                  ],
                 ),
-                _statusBar(),
-              ],
+              ),
             ),
           ),
         ),
@@ -709,6 +1028,65 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
                 onPressed: _open,
                 child: Text('Open images…    Ctrl+O'),
               ),
+              SubmenuButton(
+                menuChildren: [
+                  if (ref.watch(appSettingsProvider).recentFolders.isEmpty)
+                    const MenuItemButton(child: Text('No recent folders')),
+                  for (final path
+                      in ref.watch(appSettingsProvider).recentFolders)
+                    MenuItemButton(
+                      onPressed: () => _loadFolder(path),
+                      child: Text(path),
+                    ),
+                  const Divider(),
+                  MenuItemButton(
+                    onPressed: () {
+                      setState(
+                        () =>
+                            ref.read(appSettingsProvider).clearRecentFolders(),
+                      );
+                    },
+                    child: const Text('Clear recent folders'),
+                  ),
+                ],
+                child: const Text('Recent folders'),
+              ),
+              const Divider(),
+              SubmenuButton(
+                menuChildren: [
+                  for (final thumbnails in [false, true])
+                    MenuItemButton(
+                      leadingIcon: Icon(
+                        _thumbnails == thumbnails
+                            ? Icons.radio_button_checked
+                            : Icons.radio_button_unchecked,
+                      ),
+                      onPressed: () {
+                        _setThumbnails(thumbnails);
+                      },
+                      child: Text(thumbnails ? 'Thumbnails' : 'Files'),
+                    ),
+                ],
+                child: const Text('Sidebar view'),
+              ),
+              MenuItemButton(
+                leadingIcon: Icon(
+                  _checkerboard
+                      ? Icons.check_box
+                      : Icons.check_box_outline_blank,
+                ),
+                onPressed: () {
+                  setState(() => _checkerboard = !_checkerboard);
+                  ref
+                      .read(appSettingsProvider)
+                      .update(checkerboard: _checkerboard);
+                },
+                child: const Text('Transparency checkerboard'),
+              ),
+              MenuItemButton(
+                onPressed: _toggleFullScreen,
+                child: const Text('Fullscreen    F11'),
+              ),
               const Divider(),
               if (Platform.isWindows)
                 MenuItemButton(
@@ -771,11 +1149,66 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
           ),
           SizedBox(height: 22, child: VerticalDivider(width: 28)),
           TextButton.icon(
-            onPressed: _bytes == null
-                ? null
-                : () => _transform.value = Matrix4.identity(),
+            onPressed: _bytes == null ? null : _fit,
             icon: Icon(Icons.fit_screen_rounded, size: 20),
             label: Text('Fit'),
+          ),
+          TextButton(
+            onPressed: _bytes == null ? null : _actualSize,
+            child: const Text('100%'),
+          ),
+          ListenableBuilder(
+            listenable: _transform,
+            builder: (context, child) {
+              final scale = _dimensions == null
+                  ? 1.0
+                  : imageFitScale(_dimensions!, _viewport) *
+                        View.of(context).devicePixelRatio *
+                        _transform.value.getMaxScaleOnAxis();
+              return SizedBox(
+                width: 64,
+                child: Text(
+                  _bytes == null ? '?' : '${(scale * 100).toStringAsFixed(0)}%',
+                  key: const ValueKey('zoom-percentage'),
+                  textAlign: TextAlign.center,
+                ),
+              );
+            },
+          ),
+          ListenableBuilder(
+            listenable: _playback,
+            builder: (context, child) =>
+                _bytes == null || _playback.frameCount < 2
+                ? const SizedBox.shrink()
+                : Row(
+                    children: [
+                      IconButton(
+                        tooltip: 'Previous frame',
+                        onPressed: () => _playback.step(-1),
+                        icon: const Icon(Icons.skip_previous),
+                      ),
+                      IconButton(
+                        tooltip: _playback.playing
+                            ? 'Pause animation'
+                            : 'Play animation',
+                        onPressed: _playback.toggle,
+                        icon: Icon(
+                          _playback.playing ? Icons.pause : Icons.play_arrow,
+                        ),
+                      ),
+                      Text('${_playback.frame + 1}/${_playback.frameCount}'),
+                      IconButton(
+                        tooltip: 'Next frame',
+                        onPressed: () => _playback.step(1),
+                        icon: const Icon(Icons.skip_next),
+                      ),
+                      IconButton(
+                        tooltip: 'Save current frame',
+                        onPressed: _saveFrame,
+                        icon: const Icon(Icons.save_alt),
+                      ),
+                    ],
+                  ),
           ),
           SizedBox(width: 12),
           Tooltip(
@@ -887,6 +1320,22 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
                     ),
                   ),
                 ),
+                IconButton(
+                  tooltip: _thumbnails ? 'Show file list' : 'Show thumbnails',
+                  onPressed: () => _setThumbnails(!_thumbnails),
+                  icon: Icon(
+                    _thumbnails
+                        ? Icons.view_list_outlined
+                        : Icons.grid_view_outlined,
+                    size: 18,
+                  ),
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 30,
+                    height: 30,
+                  ),
+                  padding: EdgeInsets.zero,
+                ),
                 Text(
                   '${_folder == null ? _files.length : _entries.length}',
                   style: TextStyle(
@@ -966,7 +1415,9 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        leading: Icon(Icons.image_outlined, size: 20),
+                        leading: _thumbnails
+                            ? _thumbnail(_files[index].path)
+                            : Icon(Icons.image_outlined, size: 20),
                         title: Text(
                           _files[index].name,
                           maxLines: 1,
@@ -996,16 +1447,53 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
     child: _loading
         ? Center(child: CircularProgressIndicator(strokeWidth: 2))
         : _bytes != null
-        ? InteractiveViewer(
-            transformationController: _transform,
-            minScale: 0.25,
-            maxScale: 8,
-            onInteractionUpdate: (_) => _pixel.value = 'Pixel —',
-            child: PixelImage(
-              key: ValueKey(_bytes),
-              image: MemoryImage(_bytes!),
-              onPixel: (value) => _pixel.value = value,
-            ),
+        ? LayoutBuilder(
+            builder: (context, constraints) {
+              final viewport = constraints.biggest;
+              if (_viewport != viewport) {
+                _viewport = viewport;
+                final revision = ++_viewportRevision;
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted && revision == _viewportRevision) setState(() {});
+                });
+              }
+              final fitted = _dimensions == null
+                  ? Size.zero
+                  : applyBoxFit(
+                      BoxFit.contain,
+                      _dimensions!,
+                      viewport,
+                    ).destination;
+              return GestureDetector(
+                onSecondaryTapDown: (details) =>
+                    _showContextMenu(details.globalPosition),
+                child: InteractiveViewer(
+                  transformationController: _transform,
+                  minScale: 0.00001,
+                  maxScale: 256,
+                  onInteractionUpdate: (_) => _pixel.value = 'Pixel ?',
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (_checkerboard)
+                        Center(
+                          child: SizedBox(
+                            width: fitted.width,
+                            height: fitted.height,
+                            child: CustomPaint(painter: TransparencyGrid()),
+                          ),
+                        ),
+                      PlaybackImage(
+                        key: ValueKey(_bytes),
+                        bytes: _bytes!,
+                        playback: _playback,
+                        onPixel: (value) => _pixel.value = value,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
           )
         : Center(
             child: SingleChildScrollView(

@@ -16,4 +16,13 @@
   - [x] capture region/active window
   - [x] ctrl+c key should copy captured image
   - [x] save button
-- [ ] drag and drop image
+- [x] drag and drop image
+- [x] 100% 배율과 현재 확대율 표시
+- [x] sidebar 에 이미지 thumbnail 로 표시 옵션(파일-썸내일, EXPLORER 옆에 버튼 추가)
+- [x] side bar 에 지원하는 이미지 file 만 표시
+- [x] 폴더 변경 자동 감지
+- [x] 우클릭 메뉴
+- [x] 전체 화면 모드
+- [x] 투명 배경 체크무늬
+- [x] 최근 폴더 목록
+- [x] 애니메이션 제어
