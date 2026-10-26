@@ -4,6 +4,8 @@ import 'dart:ui';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'map_service.dart';
+
 /// In-memory by default so widget tests never change the user's settings.
 final appSettingsProvider = Provider<AppSettings>((ref) => AppSettings());
 
@@ -55,6 +57,10 @@ class AppSettings {
   }
 
   bool get dark => _values['dark'] == true;
+  MapService get mapService => MapService.values.firstWhere(
+    (service) => service.name == _values['mapService'],
+    orElse: () => MapService.google,
+  );
   bool get windowMaximized => _values['windowMaximized'] == true;
   Size? get windowSize {
     final width = _values['windowWidth'];
@@ -87,6 +93,7 @@ class AppSettings {
       _values['image'] is String ? _values['image'] as String : null;
 
   void update({
+    MapService? mapService,
     bool? dark,
     bool? thumbnails,
     bool? checkerboard,
@@ -99,6 +106,7 @@ class AppSettings {
     String? image,
     bool clearImage = false,
   }) {
+    if (mapService != null) _values['mapService'] = mapService.name;
     if (thumbnails != null) _values['thumbnails'] = thumbnails;
     if (checkerboard != null) _values['checkerboard'] = checkerboard;
     if (dark != null) _values['dark'] = dark;

@@ -6,6 +6,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:sanc_viewer/main.dart';
 import 'package:sanc_viewer/app_settings.dart';
+import 'package:sanc_viewer/map_service.dart';
+
+class _MapLauncher extends MapLauncher {
+  @override
+  Future<bool> isAvailable(MapService service) async => false;
+}
 
 void main() {
   testWidgets('Toolbar folds and restores its saved visibility', (
@@ -49,8 +55,16 @@ void main() {
           null,
         ),
       );
-      await tester.pumpWidget(const ProviderScope(child: MyApp()));
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [mapLauncherProvider.overrideWithValue(_MapLauncher())],
+          child: const MyApp(),
+        ),
+      );
       await tester.tap(find.text('File'));
+      await tester.pumpAndSettle();
+      expect(find.text('File associations'), findsNothing);
+      await tester.tap(find.text('Config'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('File associations'));
       await tester.pumpAndSettle();
@@ -63,7 +77,12 @@ void main() {
   testWidgets('Sidebar resizes within bounds and retains width when folded', (
     tester,
   ) async {
-    await tester.pumpWidget(const ProviderScope(child: MyApp()));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [mapLauncherProvider.overrideWithValue(_MapLauncher())],
+        child: const MyApp(),
+      ),
+    );
     final sidebar = find.byKey(const ValueKey('explorer-sidebar'));
     final handle = find.byKey(const ValueKey('sidebar-resize-handle'));
     expect(tester.getSize(sidebar).width, 236);
@@ -87,11 +106,20 @@ void main() {
   });
 
   testWidgets('Appearance switches between dark and light', (tester) async {
-    await tester.pumpWidget(const ProviderScope(child: MyApp()));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [mapLauncherProvider.overrideWithValue(_MapLauncher())],
+        child: const MyApp(),
+      ),
+    );
     expect(find.byTooltip('Switch to dark mode'), findsNothing);
     await tester.tap(find.text('File'));
     await tester.pumpAndSettle();
+    expect(find.text('Dark mode'), findsNothing);
+    await tester.tap(find.text('Config'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Dark mode'));
+    await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
     expect(
       Theme.of(tester.element(find.byType(Scaffold))).brightness,
@@ -99,7 +127,10 @@ void main() {
     );
     await tester.tap(find.text('File'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('Config'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Light mode'));
+    await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
     expect(
       Theme.of(tester.element(find.byType(Scaffold))).brightness,
@@ -109,7 +140,12 @@ void main() {
   });
 
   testWidgets('Empty viewer and sidebar toggle', (tester) async {
-    await tester.pumpWidget(const ProviderScope(child: MyApp()));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [mapLauncherProvider.overrideWithValue(_MapLauncher())],
+        child: const MyApp(),
+      ),
+    );
     expect(find.text('A clear view of every detail.'), findsOneWidget);
     expect(find.text('EXPLORER'), findsOneWidget);
     expect(
@@ -133,7 +169,12 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.pumpWidget(const ProviderScope(child: MyApp()));
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [mapLauncherProvider.overrideWithValue(_MapLauncher())],
+        child: const MyApp(),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(find.text('A clear view of every detail.'), findsOneWidget);
     expect(tester.takeException(), isNull);

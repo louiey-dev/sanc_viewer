@@ -26,3 +26,8 @@
 - [x] 투명 배경 체크무늬
 - [x] 최근 폴더 목록
 - [x] 애니메이션 제어
+- [x] File menu: add Config to select Google Maps, Naver Map, or Kakao Map
+  - [x] Check and display browser-launch availability for each map
+  - [x] Open geo info with the selected map
+- [x] Move into File/Config menu
+  - [x] File associations/Light mode/dark mode

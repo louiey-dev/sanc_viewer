@@ -15,7 +15,9 @@ import 'package:window_manager/window_manager.dart';
 
 import 'app_info.dart';
 import 'app_settings.dart';
-import 'app_theme.dart';
+
+import 'config_dialog.dart';
+import 'map_service.dart';
 import 'image_details.dart';
 import 'image_playback.dart';
 import 'viewer_support.dart';
@@ -1099,34 +1101,23 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
                 child: const Text('Fullscreen    F11'),
               ),
               const Divider(),
-              if (Platform.isWindows)
-                MenuItemButton(
-                  leadingIcon: const Icon(Icons.link),
-                  onPressed: _associateFiles,
-                  child: const Text('File associations'),
-                ),
+
               MenuItemButton(
-                leadingIcon: Icon(
-                  ref.watch(themeModeProvider) == ThemeMode.light
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
-                ),
-                onPressed: () => ref
-                    .read(themeModeProvider.notifier)
-                    .setMode(ThemeMode.light),
-                child: const Text('Light mode'),
+                leadingIcon: const Icon(Icons.settings_outlined),
+                onPressed: () async {
+                  await showDialog<bool>(
+                    context: context,
+                    builder: (_) => ConfigDialog(
+                      onAssociateFiles: Platform.isWindows
+                          ? _associateFiles
+                          : null,
+                    ),
+                  );
+                  if (mounted) setState(() {});
+                },
+                child: const Text('Config'),
               ),
-              MenuItemButton(
-                leadingIcon: Icon(
-                  ref.watch(themeModeProvider) == ThemeMode.dark
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
-                ),
-                onPressed: () => ref
-                    .read(themeModeProvider.notifier)
-                    .setMode(ThemeMode.dark),
-                child: const Text('Dark mode'),
-              ),
+
               const Divider(),
               MenuItemButton(onPressed: _showInfo, child: const Text('Info')),
             ],
@@ -1612,7 +1603,8 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
             _detail(Icons.location_on_outlined, 'Location: Not available')
           else
             Tooltip(
-              message: 'Open in Google Maps',
+              message:
+                  'Open in ${ref.read(appSettingsProvider).mapService.label}',
               child: TextButton.icon(
                 onPressed: _openLocation,
                 icon: const Icon(Icons.location_on_outlined, size: 14),
@@ -1630,17 +1622,14 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
   Future<void> _openLocation() async {
     final location = _details.location;
     if (location == null) return;
-    final uri = Uri.https('www.google.com', '/maps/search/', {
-      'api': '1',
-      'query': location,
-    });
-    try {
-      if (await launchUrl(uri, mode: LaunchMode.externalApplication)) return;
-    } catch (_) {}
+    final service = ref.read(appSettingsProvider).mapService;
+    if (await ref.read(mapLauncherProvider).open(service, location)) return;
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Could not open Google Maps. Please check your browser.'),
+      SnackBar(
+        content: Text(
+          'Could not open ${service.label}. Check your browser or change the map in File > Config.',
+        ),
       ),
     );
   }

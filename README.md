@@ -266,6 +266,11 @@ Release 폴더의 실행 파일 하나만 따로 전달하지 않습니다.
 
 ### History
 
+#### v0.2.2 (2026-10-26)
+
+- File/Config/ 에서 google/naver/kakao map 선택할 수 있도록 추가
+- Theme/file association 을 config 안으로 이동
+
 #### v0.2.1 (2026-10-23)
 
 - 폴더 자동 갱신 도중 새 이미지를 선택하면 이전 선택으로 돌아가던 문제 수정.
