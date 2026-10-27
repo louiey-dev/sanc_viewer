@@ -29,7 +29,15 @@ try {
                 $FlutterPath = 'C:\flutter\flutter\bin\flutter.bat'
             } else { throw 'Flutter not found. Pass -FlutterPath.' }
         }
-        & $FlutterPath build windows --release
+        $flutterCommand = Get-Command $FlutterPath -ErrorAction Stop
+        $flutterRoot = Split-Path (Split-Path $flutterCommand.Source -Parent) -Parent
+        $dart = Join-Path $flutterRoot 'bin\cache\dart-sdk\bin\dart.exe'
+        $snapshot = Join-Path $flutterRoot 'bin\cache\flutter_tools.snapshot'
+        if ((Test-Path -LiteralPath $dart) -and (Test-Path -LiteralPath $snapshot)) {
+            & $dart $snapshot build windows --release
+        } else {
+            & $FlutterPath build windows --release
+        }
         if ($LASTEXITCODE -ne 0) { throw 'Flutter release build failed.' }
     }
 

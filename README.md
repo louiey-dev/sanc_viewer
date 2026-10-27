@@ -29,7 +29,7 @@ Windows 10/11 x64용 설치 파일을 실행합니다.
 Flutter나 Visual Studio는 사용자 PC에 설치할 필요가 없습니다.
 
 ```text
-dist/SancViewer-0.2.0-windows-x64-Setup.exe
+dist/SancViewer-0.2.3-windows-x64-Setup.exe
 ```
 
 설치 파일은 아래의 설치 프로그램 생성 절차로 만듭니다.
@@ -80,9 +80,9 @@ Windows에서 이미지를 더블클릭하여 실행하면 해당 이미지를 �
 ### 화면 캡처와 복사
 
 1. **Capture** 메뉴에서 캡처 범위를 선택합니다.
-   - **Capture region**: 선택 영역.
-   - **Capture window**: 선택 창.
-   - **Capture screen**: 전체 화면.
+   - **Capture region**: 연결된 모니터 어디에서나 영역을 드래그해 선택합니다.
+   - **Capture window**: 연결된 모니터에서 창을 클릭해 선택합니다.
+   - **Capture screen**: 연결된 모든 모니터를 한 장의 이미지로 캡처합니다.
 2. 캡처가 뷰어에 표시되면 **Save**로 PNG 파일을 저장합니다.
 3. 현재 표시된 이미지는 **Ctrl+C**로 복사한 뒤 다른 앱에 붙여넣습니다.
 
@@ -241,19 +241,19 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ### 버전과 배포 파일
 
 버전은 `pubspec.yaml`의 `version`에서 읽습니다.
-예를 들어 `0.2.0`이면 다음 파일이 생성됩니다.
+현재 버전 `0.2.3`의 설치 파일과 검증 파일은 다음과 같습니다.
 
 ```text
 dist/
-  SancViewer-0.2.0-windows-x64-Setup.exe
-  SancViewer-0.2.0-windows-x64-Setup.exe.sha256
+  SancViewer-0.2.3-windows-x64-Setup.exe
+  SancViewer-0.2.3-windows-x64-Setup.exe.sha256
 ```
 
 사용자에게는 `Setup.exe`를 배포합니다.
 파일 무결성을 확인하려면 SHA-256 파일의 값과 아래 결과를 비교합니다.
 
 ```powershell
-Get-FileHash .\dist\SancViewer-0.2.0-windows-x64-Setup.exe `
+Get-FileHash .\dist\SancViewer-0.2.3-windows-x64-Setup.exe `
   -Algorithm SHA256
 ```
 
@@ -265,6 +265,18 @@ Release 폴더의 실행 파일 하나만 따로 전달하지 않습니다.
 [inno-release]: https://github.com/jrsoftware/issrc/releases/tag/is-6_4_3
 
 ### History
+
+#### v0.2.3 (2026-10-27)
+
+- Windows 캡처를 네이티브 방식으로 변경하고, 캡처 중 앱 창을 잠시 최소화해
+  캡처 대상 화면을 가리지 않도록 수정. 캡처 결과를 뷰어에 바로 표시하고
+  취소·실패·반복 캡처 시 창과 화면 상태를 복원하도록 정리.
+- **Capture region**은 연결된 모든 모니터에서 영역을 선택할 수 있도록 수정.
+  **Capture window**는 클릭한 창의 경계를 캡처하도록 수정.
+  **Capture screen**은 모든 모니터를 한 장의 이미지로 캡처.
+- 앱 아이콘을 개선하고 Windows용 다중 크기 ICO와 웹 아이콘을 갱신.
+  아이콘 재생성 스크립트 `tools/generate_app_icon.ps1` 추가.
+- 앱 버전을 `0.2.3`으로 갱신.
 
 #### v0.2.2 (2026-10-26)
 

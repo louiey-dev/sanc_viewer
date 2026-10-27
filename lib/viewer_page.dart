@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_clipboard/image_clipboard.dart';
-import 'package:screen_capturer/screen_capturer.dart';
+import 'package:just_screenshot/screenshot.dart' as native_capture;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -24,9 +24,12 @@ import 'viewer_support.dart';
 import 'my_utils.dart';
 
 final _sidebarProvider = NotifierProvider<_Sidebar, bool>(_Sidebar.new);
-final screenCapturerProvider = Provider<ScreenCapturer>(
-  (ref) => screenCapturer,
+final desktopScreenshotProvider = Provider<native_capture.Screenshot>(
+  (ref) => native_capture.Screenshot.instance,
 );
+
+enum ViewerCaptureMode { region, window, screen }
+
 final startupImageProvider = Provider<String?>((ref) => null);
 
 class _Sidebar extends Notifier<bool> {
@@ -64,6 +67,7 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
   bool _loading = false;
   String? _error;
   bool _hasCapture = false;
+  bool _capturing = false;
   bool _isMaximized = false;
   bool _toolbarVisible = true;
   bool _thumbnails = false;
@@ -176,7 +180,7 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
 
   void _refreshFolder() {
     final folder = _folder;
-    if (mounted && folder != null && !_openingFolder) {
+    if (mounted && folder != null && !_openingFolder && !_capturing) {
       unawaited(
         _loadFolder(folder, selectedPath: _current?.path, refresh: true),
       );
@@ -643,61 +647,47 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
     }
   }
 
-  Future<void> _capture(CaptureMode mode) async {
-    final temporaryPath =
-        '${Directory.systemTemp.path}${Platform.pathSeparator}'
-        'sanc_capture_${DateTime.now().microsecondsSinceEpoch}.png';
-    CapturedData? captured;
-    Object? captureError;
+  Future<void> _capture(ViewerCaptureMode mode) async {
+    if (_capturing) return;
+    _capturing = true;
+    ++_request;
+    var minimized = false;
     try {
-      captured = await ref
-          .read(screenCapturerProvider)
+      await windowManager.minimize();
+      minimized = true;
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      final captured = await ref
+          .read(desktopScreenshotProvider)
           .capture(
-            mode: mode,
-            imagePath: temporaryPath,
-            copyToClipboard: false,
-            silent: false,
+            mode: switch (mode) {
+              ViewerCaptureMode.screen => native_capture.ScreenshotMode.screen,
+              ViewerCaptureMode.region => native_capture.ScreenshotMode.region,
+              ViewerCaptureMode.window => native_capture.ScreenshotMode.window,
+            },
           );
-    } catch (error) {
-      captureError = error;
-    }
-    try {
-      Uint8List? bytes = captured?.imageBytes;
-      final temporaryFile = File(temporaryPath);
-      for (var attempt = 0; bytes == null && attempt < 5; attempt++) {
-        if (attempt > 0) {
-          await Future<void>.delayed(const Duration(milliseconds: 250));
-        }
-        if (temporaryFile.existsSync()) {
-          bytes = await temporaryFile.readAsBytes();
-        }
-      }
-      if (!mounted) return;
-      if (bytes == null) {
-        // No output and no plugin error means the user cancelled capture.
-        if (captureError == null) return;
-        m.err('Capture failed: $captureError');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Capture failed. Please try again.')),
+      if (!mounted || captured == null) return;
+      final bytes = captured.bytes;
+      final codec = await ui.instantiateImageCodec(bytes);
+      late final Size dimensions;
+      try {
+        final frame = await codec.getNextFrame();
+        dimensions = Size(
+          frame.image.width.toDouble(),
+          frame.image.height.toDouble(),
         );
-        return;
+        frame.image.dispose();
+      } finally {
+        codec.dispose();
       }
-      final decoded = await ui.instantiateImageCodec(bytes);
-      final frame = await decoded.getNextFrame();
-      final dimensions = Size(
-        frame.image.width.toDouble(),
-        frame.image.height.toDouble(),
-      );
-      frame.image.dispose();
-      decoded.dispose();
       if (!mounted) return;
+      _transform.value = Matrix4.identity();
       setState(() {
         _bytes = bytes;
         _dimensions = dimensions;
         _hasCapture = true;
         _error = null;
         _loading = false;
-        _pixel.value = 'Pixel —';
+        _pixel.value = 'Pixel ?';
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -705,14 +695,25 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
         ),
       );
     } catch (error) {
-      m.err('Capture result processing failed: $error');
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Capture failed. Please try again.')),
-      );
+      m.err('Capture failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Capture failed. Please try again.')),
+        );
+      }
     } finally {
-      final temporaryFile = File(temporaryPath);
-      if (temporaryFile.existsSync()) await temporaryFile.delete();
+      if (minimized) {
+        try {
+          await windowManager.show();
+          await windowManager.focus();
+        } catch (error) {
+          m.err('Could not restore window after capture: $error');
+        }
+      }
+      _capturing = false;
+      if (mounted && _loading && _files.isNotEmpty) {
+        unawaited(_select(_index));
+      }
     }
   }
 
@@ -854,7 +855,7 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
           control: true,
           shift: true,
         ): () =>
-            _capture(CaptureMode.region),
+            _capture(ViewerCaptureMode.region),
         SingleActivator(LogicalKeyboardKey.keyC, control: true): _copyImage,
       },
       child: Focus(
@@ -1218,15 +1219,15 @@ class _ViewerPageState extends ConsumerState<ViewerPage> with WindowListener {
             child: MenuAnchor(
               menuChildren: [
                 MenuItemButton(
-                  onPressed: () => _capture(CaptureMode.region),
+                  onPressed: () => _capture(ViewerCaptureMode.region),
                   child: Text('Capture region'),
                 ),
                 MenuItemButton(
-                  onPressed: () => _capture(CaptureMode.window),
+                  onPressed: () => _capture(ViewerCaptureMode.window),
                   child: Text('Capture window'),
                 ),
                 MenuItemButton(
-                  onPressed: () => _capture(CaptureMode.screen),
+                  onPressed: () => _capture(ViewerCaptureMode.screen),
                   child: Text('Capture screen'),
                 ),
               ],

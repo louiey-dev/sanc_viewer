@@ -36,8 +36,11 @@ Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: "fileassociations"; Description: "Register supported image formats (default app selection stays in Windows Settings)"
 
+[InstallDelete]
+Type: files; Name: "{app}\screen_capturer_windows_plugin.dll"
+
 [Files]
-Source: "{#ReleaseDir}\*"; DestDir: "{app}"; Excludes: "*.pdb,*.exp,*.lib"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#ReleaseDir}\*"; DestDir: "{app}"; Excludes: "*.pdb,*.exp,*.lib,screen_capturer_windows_plugin.dll"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#ProjectRoot}\build\installer-runtime\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

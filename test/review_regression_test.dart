@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:screen_capturer/screen_capturer.dart';
+import 'package:just_screenshot/screenshot.dart' as native_capture;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sanc_viewer/app_settings.dart';
@@ -10,28 +10,23 @@ import 'package:sanc_viewer/viewer_page.dart';
 import 'package:window_manager/window_manager.dart';
 import 'test_images.dart';
 
-class _Capture extends Fake implements ScreenCapturer {
+class _Capture extends Fake implements native_capture.Screenshot {
   _Capture(this.result, {this.fail = false});
-  final CapturedData? result;
-  final bool fail;
-  int clipboardReads = 0;
+  native_capture.CapturedData? result;
+  bool fail;
+  int calls = 0;
+  native_capture.ScreenshotMode? mode;
 
   @override
-  Future<CapturedData?> capture({
-    CaptureMode mode = CaptureMode.region,
-    String? imagePath,
-    bool copyToClipboard = true,
-    bool silent = true,
+  Future<native_capture.CapturedData?> capture({
+    required native_capture.ScreenshotMode mode,
+    bool includeCursor = false,
+    int? displayId,
   }) async {
-    expect(copyToClipboard, isFalse);
+    calls++;
+    this.mode = mode;
     if (fail) throw PlatformException(code: 'CAPTURE_FAILED');
     return result;
-  }
-
-  @override
-  Future<Uint8List?> readImageFromClipboard() async {
-    clipboardReads++;
-    return twoFrameGif();
   }
 }
 
@@ -44,56 +39,129 @@ Future<void> spin(WidgetTester tester, [int times = 40]) async {
   }
 }
 
+Future<void> pumpCapture(WidgetTester tester) async {
+  for (var i = 0; i < 8; i++) {
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+  }
+}
+
 void main() {
-  for (final outcome in ['cancel', 'failure', 'success']) {
-    testWidgets('Capture $outcome never uses an old clipboard image', (
-      tester,
-    ) async {
-      final captured = outcome == 'success'
-          ? CapturedData(
-              imageWidth: 1,
-              imageHeight: 1,
-              imageBytes: twoFrameGif(),
-            )
-          : null;
-      final capture = _Capture(captured, fail: outcome == 'failure');
+  const windowChannel = MethodChannel('window_manager');
+  for (final outcome in ['screen', 'region', 'window', 'cancel', 'failure']) {
+    testWidgets('Native capture $outcome updates the viewer', (tester) async {
+      final events = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        windowChannel,
+        (call) async {
+          events.add(call.method);
+          return call.method.startsWith('is') ? false : true;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          windowChannel,
+          null,
+        ),
+      );
+      final successful =
+          outcome == 'screen' || outcome == 'region' || outcome == 'window';
+      final capture = _Capture(
+        successful
+            ? native_capture.CapturedData(
+                width: 1,
+                height: 1,
+                bytes: twoFrameGif(),
+              )
+            : null,
+        fail: outcome == 'failure',
+      );
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [screenCapturerProvider.overrideWithValue(capture)],
+          overrides: [desktopScreenshotProvider.overrideWithValue(capture)],
           child: const MaterialApp(home: ViewerPage()),
         ),
       );
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
-      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
-      await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
-      // File result retries run on the widget test clock.
-      for (var i = 0; i < 8; i++) {
-        await tester.pump(const Duration(milliseconds: 250));
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      if (outcome == 'screen' || outcome == 'window') {
+        await tester.tap(find.text('Capture'));
+        await tester.pump();
+        await tester.tap(
+          find.text(
+          outcome == 'screen' ? 'Capture screen' : 'Capture window',
+          ),
         );
+      } else {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       }
-      await tester.pump();
-      expect(capture.clipboardReads, 0);
+      await pumpCapture(tester);
+      expect(capture.calls, 1);
+      expect(capture.mode, switch (outcome) {
+        'screen' => native_capture.ScreenshotMode.screen,
+        'window' => native_capture.ScreenshotMode.window,
+        _ => native_capture.ScreenshotMode.region,
+      });
+      expect(events, contains('minimize'));
+      expect(events, contains('show'));
+      expect(find.text('Save'), successful ? findsOneWidget : findsNothing);
       expect(
-        find.text('Capture ready. Use Save to export the PNG.'),
-        outcome == 'success' ? findsOneWidget : findsNothing,
+        find.byType(PlaybackImage),
+        successful ? findsOneWidget : findsNothing,
       );
       expect(
         find.text('Capture failed. Please try again.'),
         outcome == 'failure' ? findsOneWidget : findsNothing,
-      );
-      expect(
-        find.byType(PlaybackImage),
-        outcome == 'success' ? findsOneWidget : findsNothing,
       );
       await tester.pumpWidget(const SizedBox());
       expect(tester.takeException(), isNull);
     });
   }
 
+  testWidgets('A cancelled capture allows another capture', (tester) async {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      windowChannel,
+      (call) async => call.method.startsWith('is') ? false : true,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        windowChannel,
+        null,
+      ),
+    );
+    final capture = _Capture(null);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [desktopScreenshotProvider.overrideWithValue(capture)],
+        child: const MaterialApp(home: ViewerPage()),
+      ),
+    );
+    Future<void> trigger() async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await pumpCapture(tester);
+    }
+
+    await trigger();
+    expect(capture.calls, 1);
+    capture.result = native_capture.CapturedData(
+      width: 1,
+      height: 1,
+      bytes: twoFrameGif(),
+    );
+    await trigger();
+    expect(capture.calls, 2);
+    expect(find.text('Save'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('A completed non-looping GIF can be replayed', (tester) async {
     final bytes = twoFrameGif().toList()..removeRange(19, 38);
     final playback = ImagePlayback();
